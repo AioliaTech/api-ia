@@ -199,7 +199,7 @@ def encontrar_melhor_match(texto: str, lista_opcoes: List[str], threshold: int =
     return melhor_match
 
 def extrair_parametros_inteligente(query: str) -> SearchParams:
-    """Extrai parâmetros de busca automaticamente da query em linguagem natural"""
+    """Extrai parâmetros de busca automaticamente da query em linguagem natural - VERSÃO CORRIGIDA"""
     query_lower = query.lower()
     params = SearchParams()
     
@@ -221,66 +221,78 @@ def extrair_parametros_inteligente(query: str) -> SearchParams:
             params.ano_min = min(anos)
             params.ano_max = max(anos)
     
-    # Extrair categoria (SUV, sedan, hatch, etc.)
+    # Extrair categoria (SUV, sedan, hatch, etc.) - BUSCA EXATA PRIMEIRO
     categorias_possiveis = list(set(MAPEAMENTO_CATEGORIAS.values()))
     for categoria in categorias_possiveis:
-        if categoria.lower() in query_lower:
+        # Busca exata por palavra completa
+        if f' {categoria.lower()} ' in f' {query_lower} ' or query_lower.startswith(categoria.lower()) or query_lower.endswith(categoria.lower()):
             params.categoria = categoria
             break
     
-    # Extrair marca
-    palavras = query_lower.split()
-    for palavra in palavras:
-        marca_encontrada = encontrar_melhor_match(palavra, MARCAS_CONHECIDAS)
-        if marca_encontrada:
+    # Remove palavras irrelevantes antes de buscar marca/modelo
+    stopwords = ['quero', 'busco', 'preciso', 'ate', 'até', 'cor', 'ano', 'km', 'automatico', 'manual', 'um', 'uma', 'de', 'com', 'sem', 'mil', 'reais', 'real']
+    palavras_limpas = []
+    
+    for palavra in query_lower.split():
+        palavra_limpa = re.sub(r'[^\w]', '', palavra)  # Remove pontuação
+        if palavra_limpa not in stopwords and len(palavra_limpa) > 2:
+            palavras_limpas.append(palavra_limpa)
+    
+    # Extrair marca - BUSCA MAIS RESTRITIVA
+    for palavra in palavras_limpas:
+        # Busca exata primeiro
+        if palavra in [m.lower() for m in MARCAS_CONHECIDAS]:
+            marca_encontrada = next(m for m in MARCAS_CONHECIDAS if m.lower() == palavra)
             params.marca = marca_encontrada.title()
             break
+        # Só usa fuzzy matching se a palavra for muito similar (>90%)
+        elif len(palavra) >= 4:
+            marca_encontrada = encontrar_melhor_match(palavra, MARCAS_CONHECIDAS, threshold=90)
+            if marca_encontrada:
+                params.marca = marca_encontrada.title()
+                break
     
-    # Extrair modelo (busca por palavras que podem ser modelos)
+    # Extrair modelo - BUSCA MAIS RESTRITIVA
     modelos_conhecidos = list(MAPEAMENTO_CATEGORIAS.keys())
-    for palavra in palavras:
-        modelo_encontrado = encontrar_melhor_match(palavra, modelos_conhecidos)
-        if modelo_encontrado:
+    for palavra in palavras_limpas:
+        # Busca exata primeiro
+        if palavra in [m.lower() for m in modelos_conhecidos]:
+            modelo_encontrado = next(m for m in modelos_conhecidos if m.lower() == palavra)
             params.modelo = modelo_encontrado
             # Se encontrou modelo, pode inferir categoria
             if not params.categoria:
                 params.categoria = MAPEAMENTO_CATEGORIAS.get(modelo_encontrado)
             break
-    
-    # Se não encontrou modelo específico, tenta busca mais ampla
-    if not params.modelo:
-        query_sem_stopwords = re.sub(r'\b(busco|quero|preciso|ate|cor|ano|km|automatico|manual)\b', '', query_lower)
-        palavras_relevantes = [p for p in query_sem_stopwords.split() if len(p) > 2]
-        
-        for palavra in palavras_relevantes:
-            modelo_encontrado = encontrar_melhor_match(palavra, modelos_conhecidos, threshold=60)
+        # Só usa fuzzy matching se a palavra for muito similar (>85%)
+        elif len(palavra) >= 4:
+            modelo_encontrado = encontrar_melhor_match(palavra, modelos_conhecidos, threshold=85)
             if modelo_encontrado:
                 params.modelo = modelo_encontrado
                 if not params.categoria:
                     params.categoria = MAPEAMENTO_CATEGORIAS.get(modelo_encontrado)
                 break
     
-    # Extrair cor
+    # Extrair cor - BUSCA EXATA
     for cor in CORES_CONHECIDAS:
-        if cor in query_lower:
+        if f' {cor} ' in f' {query_lower} ' or query_lower.startswith(cor) or query_lower.endswith(cor):
             params.cor = cor
             break
     
-    # Extrair combustível
+    # Extrair combustível - BUSCA EXATA
     for combustivel in COMBUSTIVEIS_CONHECIDOS:
-        if combustivel in query_lower:
+        if f' {combustivel} ' in f' {query_lower} ' or query_lower.startswith(combustivel) or query_lower.endswith(combustivel):
             params.combustivel = combustivel
             break
     
-    # Extrair transmissão
+    # Extrair transmissão - BUSCA EXATA
     for transmissao in TRANSMISSOES_CONHECIDAS:
-        if transmissao in query_lower:
+        if f' {transmissao} ' in f' {query_lower} ' or query_lower.startswith(transmissao) or query_lower.endswith(transmissao):
             params.transmissao = transmissao
             break
     
     # Extrair quilometragem
     km_patterns = [
-        r'(\d+)k?m\s*km',
+        r'(\d+)k?\s*km',
         r'(\d+)\s*mil\s*km',
         r'km\s*(\d+)',
         r'(\d+)\s*k\s*km'
