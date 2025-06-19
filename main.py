@@ -66,7 +66,7 @@ def search_smart(request_data: dict):
     except Exception:
         return JSONResponse({"error": "Erro ao ler os dados", "resultados": [], "total_encontrado": 0}, status_code=500)
 
-    params = SearchParams(**{k: v for k, v in request_data.items() if k in SearchParams.__annotations__})
+params = extrair_parametros_inteligente(query)
 
     def filtrar(veiculos):
         resultado = []
