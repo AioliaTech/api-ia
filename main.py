@@ -111,191 +111,204 @@ TRANSMISSOES_CONHECIDAS = [
 ]
 
 class SearchParams(BaseModel):
-    marca: Optional[str] = None
     modelo: Optional[str] = None
-    ano: Optional[int] = None
-    ano_fabricacao: Optional[int] = None
-    km: Optional[float] = None
+    marca: Optional[str] = None
+    categoria: Optional[str] = None
     cor: Optional[str] = None
     combustivel: Optional[str] = None
-    cambio: Optional[str] = None
-    motor: Optional[str] = None
-    portas: Optional[int] = None
-    categoria: Optional[str] = None
-    preco: Optional[float] = None
-    opcionais: Optional[str] = None
+    transmissao: Optional[str] = None
+    valor_max: Optional[float] = None
+    valor_min: Optional[float] = None
+    ano_min: Optional[int] = None
+    ano_max: Optional[int] = None
+    km_max: Optional[float] = None
 
-def extrair_parametros_inteligente(query: str) -> SearchParams:
-    """Extrai APENAS os parâmetros explicitamente mencionados na query"""
-    query_lower = query.lower()
-    params = SearchParams()
-    
-    # Extrair preço/valor
-    padroes_preco = [
-        r'(?:ate|até|max|maximo|máximo|teto|limite)?\s*r?\$?\s*([\d,.]+)\s*(?:mil|k|reais?|r\$)?',
-        r'preco\s*(?:ate|até|max|maximo|máximo)?\s*r?\$?\s*([\d,.]+)',
-        r'valor\s*(?:ate|até|max|maximo|máximo)?\s*r?\$?\s*([\d,.]+)'
+def normalizar(texto: str) -> str:
+    """Função de normalização mantida do código original"""
+    return unidecode(texto).lower().replace("-", "").replace(" ", "").strip()
+
+def extrair_valores_numericos(texto: str) -> List[float]:
+    """Extrai valores numéricos do texto, considerando formatos brasileiros"""
+    # Padrões para valores em reais
+    padroes_valores = [
+        r'r\$\s*([\d,.]+)',  # R$ 150.000 ou R$ 150,000
+        r'([\d,.]+)\s*reais?',  # 150000 reais
+        r'([\d,.]+)\s*mil',  # 150 mil
+        r'ate\s*([\d,.]+)',  # até 150000
+        r'max\s*([\d,.]+)',  # max 150000
+        r'maximo\s*([\d,.]+)',  # máximo 150000
+        r'([\d,.]+)',  # qualquer número
     ]
     
-    for padrao in padroes_preco:
-        matches = re.findall(padrao, query_lower)
-        if matches and any(word in query_lower for word in ['ate', 'até', 'max', 'maximo', 'máximo', 'teto', 'limite', 'preco', 'valor']):
+    valores = []
+    texto_lower = texto.lower()
+    
+    for padrao in padroes_valores:
+        matches = re.findall(padrao, texto_lower)
+        for match in matches:
             try:
-                valor_str = matches[0].replace(',', '').replace('.', '')
+                # Remove pontos e vírgulas, converte para float
+                valor_str = match.replace(',', '').replace('.', '')
                 valor = float(valor_str)
-                if 'mil' in query_lower or 'k' in query_lower:
-                    if valor < 1000:  # Se for menor que 1000, provavelmente já está em milhares
-                        valor *= 1000
-                params.preco = valor
-                break
+                
+                # Se encontrou "mil" no contexto, multiplica por 1000
+                if 'mil' in texto_lower:
+                    valor *= 1000
+                
+                valores.append(valor)
             except ValueError:
                 continue
     
-    # Extrair ano - APENAS se explicitamente mencionado
-    if 'ano' in query_lower or re.search(r'\b(20\d{2}|19\d{2})\b', query_lower):
-        anos = re.findall(r'\b(20\d{2}|19\d{2})\b', query_lower)
-        if anos:
-            params.ano = int(anos[0])
+    return sorted(set(valores), reverse=True)
+
+def extrair_anos(texto: str) -> List[int]:
+    """Extrai anos do texto"""
+    padroes_ano = [
+        r'(20\d{2})',  # 2020, 2021, etc.
+        r'(19\d{2})',  # 1999, 1998, etc.
+        r'ano\s*(20\d{2})',
+        r'modelo\s*(20\d{2})',
+    ]
     
-    # Extrair ano de fabricação - APENAS se explicitamente mencionado
-    if 'fabricacao' in query_lower or 'fabricação' in query_lower:
-        anos = re.findall(r'fabricac[aã]o\s*(\d{4})', query_lower)
-        if anos:
-            params.ano_fabricacao = int(anos[0])
+    anos = []
+    for padrao in padroes_ano:
+        matches = re.findall(padrao, texto.lower())
+        for match in matches:
+            try:
+                ano = int(match)
+                if 1980 <= ano <= 2030:  # Anos válidos para veículos
+                    anos.append(ano)
+            except ValueError:
+                continue
     
-    # Extrair km - APENAS se explicitamente mencionado
-    if 'km' in query_lower:
-        km_patterns = [
-            r'(\d+)\.?(\d*)\s*k?m?\s*km',
-            r'(\d+)\s*mil\s*km',
-            r'km\s*(\d+)',
-            r'(\d+)\s*k\s*km'
-        ]
-        
-        for pattern in km_patterns:
-            matches = re.findall(pattern, query_lower)
-            if matches:
-                try:
-                    if isinstance(matches[0], tuple):
-                        km = float(matches[0][0])
-                    else:
-                        km = float(matches[0])
-                    if km < 1000 and 'mil' in query_lower:
-                        km *= 1000
-                    params.km = km
-                    break
-                except ValueError:
-                    continue
+    return sorted(set(anos))
+
+def encontrar_melhor_match(texto: str, lista_opcoes: List[str], threshold: int = 70) -> Optional[str]:
+    """Encontra a melhor correspondência usando fuzzy matching"""
+    texto_norm = normalizar(texto)
+    melhor_score = 0
+    melhor_match = None
     
-    # Extrair cor - APENAS se explicitamente mencionada
-    cores_encontradas = []
+    for opcao in lista_opcoes:
+        opcao_norm = normalizar(opcao)
+        score = fuzz.partial_ratio(texto_norm, opcao_norm)
+        if score > melhor_score and score >= threshold:
+            melhor_score = score
+            melhor_match = opcao
+    
+    return melhor_match
+
+def extrair_parametros_inteligente(query: str) -> SearchParams:
+    """Extrai parâmetros de busca automaticamente da query em linguagem natural - VERSÃO CORRIGIDA"""
+    query_lower = query.lower()
+    params = SearchParams()
+    
+    # Extrair valores monetários
+    valores = extrair_valores_numericos(query)
+    if valores:
+        # Assume que o maior valor é o máximo desejado
+        if any(word in query_lower for word in ['ate', 'max', 'maximo', 'teto', 'limite']):
+            params.valor_max = valores[0]
+        else:
+            params.valor_max = valores[0]
+    
+    # Extrair anos
+    anos = extrair_anos(query)
+    if anos:
+        if len(anos) == 1:
+            params.ano_min = anos[0]
+        else:
+            params.ano_min = min(anos)
+            params.ano_max = max(anos)
+    
+    # Extrair categoria (SUV, sedan, hatch, etc.) - BUSCA EXATA PRIMEIRO
+    categorias_possiveis = list(set(MAPEAMENTO_CATEGORIAS.values()))
+    for categoria in categorias_possiveis:
+        # Busca exata por palavra completa
+        if f' {categoria.lower()} ' in f' {query_lower} ' or query_lower.startswith(categoria.lower()) or query_lower.endswith(categoria.lower()):
+            params.categoria = categoria
+            break
+    
+    # Remove palavras irrelevantes antes de buscar marca/modelo
+    stopwords = ['quero', 'busco', 'preciso', 'ate', 'até', 'cor', 'ano', 'km', 'automatico', 'manual', 'um', 'uma', 'de', 'com', 'sem', 'mil', 'reais', 'real']
+    palavras_limpas = []
+    
+    for palavra in query_lower.split():
+        palavra_limpa = re.sub(r'[^\w]', '', palavra)  # Remove pontuação
+        if palavra_limpa not in stopwords and len(palavra_limpa) > 2:
+            palavras_limpas.append(palavra_limpa)
+    
+    # Extrair marca - BUSCA MAIS RESTRITIVA
+    for palavra in palavras_limpas:
+        # Busca exata primeiro
+        if palavra in [m.lower() for m in MARCAS_CONHECIDAS]:
+            marca_encontrada = next(m for m in MARCAS_CONHECIDAS if m.lower() == palavra)
+            params.marca = marca_encontrada.title()
+            break
+        # Só usa fuzzy matching se a palavra for muito similar (>90%)
+        elif len(palavra) >= 4:
+            marca_encontrada = encontrar_melhor_match(palavra, MARCAS_CONHECIDAS, threshold=90)
+            if marca_encontrada:
+                params.marca = marca_encontrada.title()
+                break
+    
+    # Extrair modelo - BUSCA MAIS RESTRITIVA
+    modelos_conhecidos = list(MAPEAMENTO_CATEGORIAS.keys())
+    for palavra in palavras_limpas:
+        # Busca exata primeiro
+        if palavra in [m.lower() for m in modelos_conhecidos]:
+            modelo_encontrado = next(m for m in modelos_conhecidos if m.lower() == palavra)
+            params.modelo = modelo_encontrado
+            # Se encontrou modelo, pode inferir categoria
+            if not params.categoria:
+                params.categoria = MAPEAMENTO_CATEGORIAS.get(modelo_encontrado)
+            break
+        # Só usa fuzzy matching se a palavra for muito similar (>85%)
+        elif len(palavra) >= 4:
+            modelo_encontrado = encontrar_melhor_match(palavra, modelos_conhecidos, threshold=85)
+            if modelo_encontrado:
+                params.modelo = modelo_encontrado
+                if not params.categoria:
+                    params.categoria = MAPEAMENTO_CATEGORIAS.get(modelo_encontrado)
+                break
+    
+    # Extrair cor - BUSCA EXATA
     for cor in CORES_CONHECIDAS:
-        if cor in query_lower:
-            cores_encontradas.append(cor)
+        if f' {cor} ' in f' {query_lower} ' or query_lower.startswith(cor) or query_lower.endswith(cor):
+            params.cor = cor
+            break
     
-    if cores_encontradas:
-        # Pega a cor mais específica (mais longa)
-        params.cor = max(cores_encontradas, key=len)
-    
-    # Extrair combustível - APENAS se explicitamente mencionado
+    # Extrair combustível - BUSCA EXATA
     for combustivel in COMBUSTIVEIS_CONHECIDOS:
-        if combustivel in query_lower:
+        if f' {combustivel} ' in f' {query_lower} ' or query_lower.startswith(combustivel) or query_lower.endswith(combustivel):
             params.combustivel = combustivel
             break
     
-    # Extrair câmbio/transmissão - APENAS se explicitamente mencionado
-    cambios = ['manual', 'automatico', 'automatica', 'cvt', 'semi-automatico', 'semi-automatica', 'tiptronic']
-    for cambio in cambios:
-        if cambio in query_lower:
-            params.cambio = cambio
+    # Extrair transmissão - BUSCA EXATA
+    for transmissao in TRANSMISSOES_CONHECIDAS:
+        if f' {transmissao} ' in f' {query_lower} ' or query_lower.startswith(transmissao) or query_lower.endswith(transmissao):
+            params.transmissao = transmissao
             break
     
-    # Extrair motor - APENAS se explicitamente mencionado
-    if 'motor' in query_lower:
-        motor_patterns = [
-            r'motor\s*(\d+\.?\d*)',
-            r'(\d+\.?\d*)\s*(?:litros?|l)\s*motor',
-            r'(\d+\.?\d*)\s*motor'
-        ]
-        
-        for pattern in motor_patterns:
-            matches = re.findall(pattern, query_lower)
-            if matches:
-                params.motor = matches[0]
+    # Extrair quilometragem
+    km_patterns = [
+        r'(\d+)k?\s*km',
+        r'(\d+)\s*mil\s*km',
+        r'km\s*(\d+)',
+        r'(\d+)\s*k\s*km'
+    ]
+    
+    for pattern in km_patterns:
+        matches = re.findall(pattern, query_lower)
+        if matches:
+            try:
+                km = float(matches[0])
+                if km < 1000:  # Provavelmente em milhares
+                    km *= 1000
+                params.km_max = km
                 break
-    
-    # Extrair portas - APENAS se explicitamente mencionado
-    if 'porta' in query_lower:
-        portas_patterns = [
-            r'(\d+)\s*porta',
-            r'porta\s*(\d+)'
-        ]
-        
-        for pattern in portas_patterns:
-            matches = re.findall(pattern, query_lower)
-            if matches:
-                try:
-                    params.portas = int(matches[0])
-                    break
-                except ValueError:
-                    continue
-    
-    # Extrair categoria - APENAS se explicitamente mencionada
-    categorias_possiveis = ['hatch', 'sedan', 'suv', 'caminhonete', 'utilitario', 'utilitário', 'furgao', 'furgão', 
-                           'coupe', 'coupé', 'conversivel', 'conversível', 'minivan', 'station wagon', 'off-road']
-    
-    for categoria in categorias_possiveis:
-        if categoria in query_lower:
-            # Mapear para formato padrão
-            if categoria in ['suv']:
-                params.categoria = 'SUV'
-            elif categoria in ['utilitario', 'utilitário']:
-                params.categoria = 'Utilitário'
-            elif categoria in ['furgao', 'furgão']:
-                params.categoria = 'Furgão'
-            elif categoria in ['coupe', 'coupé']:
-                params.categoria = 'Coupe'
-            elif categoria in ['conversivel', 'conversível']:
-                params.categoria = 'Conversível'
-            else:
-                params.categoria = categoria.title()
-            break
-    
-    # Extrair marca - APENAS se explicitamente mencionada
-    # Busca por marcas que aparecem como palavras completas na query
-    palavras_query = query_lower.split()
-    for palavra in palavras_query:
-        palavra_limpa = re.sub(r'[^\w]', '', palavra)
-        for marca in MARCAS_CONHECIDAS:
-            if palavra_limpa == marca.lower():
-                params.marca = marca.title()
-                break
-        if params.marca:
-            break
-    
-    # Extrair modelo - APENAS se explicitamente mencionado
-    # Busca por modelos que aparecem como palavras na query
-    modelos_conhecidos = list(MAPEAMENTO_CATEGORIAS.keys())
-    for palavra in palavras_query:
-        palavra_limpa = re.sub(r'[^\w]', '', palavra)
-        for modelo in modelos_conhecidos:
-            if palavra_limpa == modelo.lower():
-                params.modelo = modelo
-                break
-        if params.modelo:
-            break
-    
-    # Extrair opcionais - busca por palavras relacionadas
-    opcionais_keywords = ['ar', 'arcondicionado', 'direcao', 'direção', 'eletrica', 'elétrica', 'vidro', 'eletrico', 'elétrico', 
-                         'trava', 'alarme', 'airbag', 'abs', 'cd', 'mp3', 'bluetooth', 'gps', 'navegador']
-    
-    opcionais_encontrados = []
-    for opcional in opcionais_keywords:
-        if opcional in query_lower:
-            opcionais_encontrados.append(opcional)
-    
-    if opcionais_encontrados:
-        params.opcionais = ', '.join(opcionais_encontrados)
+            except ValueError:
+                continue
     
     return params
 
