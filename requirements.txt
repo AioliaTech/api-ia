@@ -5,3 +5,5 @@ requests
 apscheduler
 unidecode
 rapidfuzz
+pydantic
+typing
