@@ -12,5 +12,8 @@ rapidfuzz
 # Agendador de tarefas em background
 apscheduler
 
+# Dependência para o seu xml_fetcher.py
+xmltodict
+
 # Necessário para o script de atualização de vocabulário
 requests
