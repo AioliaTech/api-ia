@@ -1,3 +1,5 @@
+# requirements.txt
+
 # Framework da API
 fastapi
 uvicorn[standard]
@@ -7,8 +9,8 @@ spacy>=3.7.0,<4.0.0
 unidecode
 rapidfuzz
 
-# Requisições HTTP (para a API FIPE)
-requests
-
-# Agendador de tarefas
+# Agendador de tarefas em background
 apscheduler
+
+# Necessário para o script de atualização de vocabulário
+requests
