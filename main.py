@@ -12,9 +12,18 @@ app = FastAPI()
 # Load spaCy model
 nlp = spacy.load("pt_core_news_sm")
 
-# Load marca/modelo/cor/etc.
-with open("database.json", encoding="utf-8") as f:
-    db = json.load(f)
+# Dados internos para matcher
+# 🔧 Você pode editar ou expandir essas listas diretamente aqui
+db = {
+    "marca": ["chevrolet", "volkswagen", "fiat", "ford"],
+    "modelo": ["onix", "gol", "fiesta", "hb20", "corolla"],
+    "cor": ["branco", "preto", "vermelho", "azul", "prata"],
+    "combustivel": ["gasolina", "etanol", "flex", "diesel"],
+    "motor": ["1.0", "1.6", "2.0", "turbo"],
+    "cambio": ["manual", "automático"],
+    "portas": ["2", "4"],
+    "categoria": ["sedan", "hatch", "suv", "pickup"]
+}
 
 matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
 
