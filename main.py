@@ -35,7 +35,6 @@ MAPEAMENTO_CATEGORIAS = {
     # etc...
 }
 
-
 # --- MODELOS PYDANTIC ---
 class SearchParams(BaseModel):
     marcas: Optional[List[str]] = None
@@ -56,51 +55,120 @@ class SearchParams(BaseModel):
     km_max: Optional[int] = None
     portas: Optional[int] = None
 
-# --- FUNÇÕES AUXILIARES E DE LÓGICA ---
+# --- FUNÇÕES DE LÓGICA (EXTRAÇÃO E FILTRO) ---
 
 def normalizar(texto: str) -> str:
+    """Normaliza texto para comparação."""
     return unidecode(str(texto)).lower().strip()
 
 def extrair_parametros_com_spacy(query: str) -> SearchParams:
+    """Extrai parâmetros da query usando os matchers SpaCy pré-compilados."""
     nlp = SPACY_MATCHERS.get("nlp")
     if not nlp:
+        logging.error("Modelo SpaCy não carregado.")
         return SearchParams()
+
     doc = nlp(query.lower())
     params = SearchParams(marcas=[], modelos=[], versoes=[], categorias=[], cores=[], combustiveis=[], cambios=[], motores=[], opcionais=[])
     
-    # PhraseMatcher para vocabulário
+    param_field_map = {
+        "MARCA": params.marcas, "MODELO": params.modelos, "VERSAO": params.versoes
+        # Adicione aqui outras entidades do PhraseMatcher se necessário
+    }
+
     if "phrase_matcher" in SPACY_MATCHERS:
         phrase_matcher = SPACY_MATCHERS["phrase_matcher"]
         matches = phrase_matcher(doc)
-        param_field_map = {
-            "MARCA": params.marcas, "MODELO": params.modelos, "VERSAO": params.versoes,
-        }
         for match_id, start, end in matches:
             entity_label = nlp.vocab.strings[match_id]
             entity_text = doc[start:end].text
             if entity_label in param_field_map and entity_text not in param_field_map[entity_label]:
                 param_field_map[entity_label].append(entity_text)
-
-    # Adicionar extração de categoria por inferência, se não encontrada
+    
     if not params.categorias and params.modelos:
         for modelo in params.modelos:
             categoria = MAPEAMENTO_CATEGORIAS.get(normalizar(modelo))
             if categoria and categoria not in params.categorias:
                 params.categorias.append(categoria)
 
-    # Matcher para padrões (preço, ano, etc.)
     if "matcher" in SPACY_MATCHERS:
         matcher = SPACY_MATCHERS["matcher"]
         matches = matcher(doc)
-        # ... (código da função extrair_parametros... para PRECO, ANO, KM, etc)
-        # (Omitido por brevidade, mas cole aqui a lógica da resposta anterior)
-        
+        for match_id, start, end in matches:
+            rule_id = nlp.vocab.strings[match_id]
+            span = doc[start:end]
+            num_token = next((token for token in span if token.like_num), None)
+            if not num_token: continue
+            
+            valor_str = num_token.text.replace('.', '').replace(',', '')
+            valor = int(valor_str) if valor_str.isdigit() else 0
+            
+            is_price = any(t.lower_ in ["mil", "k", "reais"] for t in span) or valor > 5000
+
+            if rule_id.startswith("PRECO") and is_price:
+                if "mil" in span.text or "k" in span.text: valor *= 1000
+                if rule_id == "PRECO_MAX": params.valor_max = float(valor)
+                if rule_id == "PRECO_MIN": params.valor_min = float(valor)
+            elif rule_id == "ANO_MODELO" and 1950 < valor < 2050:
+                if params.ano_min is None: params.ano_min = valor
+                else: params.ano_max = valor
+            elif rule_id == "ANO_FABRICACAO" and 1950 < valor < 2050:
+                if params.ano_fabricacao_min is None: params.ano_fabricacao_min = valor
+                else: params.ano_fabricacao_max = valor
+            elif rule_id == "KM_MAX":
+                if "mil" in span.text or "k" in span.text: valor *= 1000
+                params.km_max = valor
+            elif rule_id == "PORTAS":
+                params.portas = valor
+
+    for prefix in ["ano", "ano_fabricacao"]:
+        min_attr, max_attr = f"{prefix}_min", f"{prefix}_max"
+        min_val, max_val = getattr(params, min_attr), getattr(params, max_attr)
+        if min_val and max_val and min_val > max_val:
+            setattr(params, min_attr, max_val), setattr(params, max_attr, min_val)
+        if min_val and not max_val:
+            setattr(params, max_attr, min_val)
+
     return params
 
 def filtrar_veiculos_inteligente(vehicles: List[Dict], params: SearchParams) -> List[Dict]:
+    """Filtra a lista de veículos com base nos parâmetros extraídos."""
     filtered = list(vehicles)
-    # ... (código da função filtrar_veiculos_inteligente... da resposta anterior)
-    # (Omitido por brevidade, mas cole aqui a lógica da resposta anterior)
+
+    text_filters = {
+        "marcas": "marca", "modelos": "modelo", "versoes": "titulo",
+        "categorias": "categoria", "cores": "cor", "combustiveis": "combustivel",
+        "cambios": "cambio", "motores": "titulo"
+    }
+    for param_name, field_name in text_filters.items():
+        param_values = getattr(params, param_name)
+        if param_values:
+            filtered = [
+                v for v in filtered if (val := v.get(field_name)) and any(
+                    fuzz.partial_ratio(normalizar(p_val), normalizar(val)) >= 85 for p_val in param_values
+                )
+            ]
+
+    if params.opcionais:
+        filtered = [
+            v for v in filtered if (opts := v.get("opcionais")) and isinstance(opts, list) and all(
+                any(fuzz.partial_ratio(normalizar(req_opt), normalizar(v_opt)) >= 90 for v_opt in opts)
+                for req_opt in params.opcionais
+            )
+        ]
+
+    def to_float(p): return float(str(p).replace(",", "").strip("R$ ")) if p else None
+    
+    if params.valor_max: filtered = [v for v in filtered if (p := to_float(v.get("preco"))) and p <= params.valor_max]
+    if params.valor_min: filtered = [v for v in filtered if (p := to_float(v.get("preco"))) and p >= params.valor_min]
+    if params.ano_max: filtered = [v for v in filtered if (a := v.get("ano")) and int(a) <= params.ano_max]
+    if params.ano_min: filtered = [v for v in filtered if (a := v.get("ano")) and int(a) >= params.ano_min]
+    if params.ano_fabricacao_max: filtered = [v for v in filtered if (a := v.get("ano_fabricacao")) and int(a) <= params.ano_fabricacao_max]
+    if params.ano_fabricacao_min: filtered = [v for v in filtered if (a := v.get("ano_fabricacao")) and int(a) >= params.ano_fabricacao_min]
+    if params.km_max: filtered = [v for v in filtered if (k := v.get("km")) and int(k) <= params.km_max]
+    if params.portas: filtered = [v for v in filtered if (p := v.get("portas")) and int(p) == params.portas]
+    
+    filtered.sort(key=lambda v: to_float(v.get("preco")) or 0, reverse=True)
     return filtered
 
 
@@ -123,9 +191,13 @@ def load_inventory_from_file():
 def update_and_reload_inventory():
     """Função que o agendador chamará: busca os dados e recarrega na memória."""
     logging.info("Tarefa agendada: iniciando atualização do inventário.")
-    fetch_and_convert_xml()  # Seu script que cria o dados.json
-    load_inventory_from_file() # Recarrega os novos dados para a memória da API
-    logging.info("Tarefa agendada: atualização do inventário concluída.")
+    try:
+        fetch_and_convert_xml()
+        load_inventory_from_file()
+        logging.info("Tarefa agendada: atualização do inventário concluída.")
+    except Exception as e:
+        logging.error(f"Falha na tarefa agendada de atualização: {e}")
+
 
 # --- EVENTO DE STARTUP DA API ---
 
@@ -153,9 +225,14 @@ def startup_event():
             logging.warning(f"Arquivo de vocabulário '{VOCABULARY_FILE}' não encontrado.")
             
         matcher = Matcher(nlp.vocab)
-        # Adicione aqui as regras do matcher para preço, ano, km, etc.
+        # Adicione aqui as regras do matcher
+        matcher.add("PRECO_MAX", [[{"LOWER": {"IN": ["ate", "maximo", "max", "teto", "abaixo de"]}}, {"IS_SPACE": True, "OP": "?"}, {"LIKE_NUM": True}]])
+        matcher.add("PRECO_MIN", [[{"LOWER": {"IN": ["a partir de", "acima de", "minimo"]}}, {"IS_SPACE": True, "OP": "?"}, {"LIKE_NUM": True}]])
+        matcher.add("ANO_MODELO", [[{"LOWER": "ano", "OP": "!"}, {"LOWER": "de", "OP": "!"}, {"LOWER": "fabricacao", "OP": "!"}, {"IS_DIGIT": True, "SHAPE": "dddd"}]])
+        matcher.add("ANO_FABRICacao", [[{"LOWER": {"IN": ["fabricado", "fabricacao"]}}, {"LOWER": "em", "OP": "?"}, {"LOWER": "de", "OP": "?"}, {"IS_DIGIT": True, "SHAPE": "dddd"}]])
+        matcher.add("KM_MAX", [[{"LOWER": {"IN": ["ate", "maximo", "max", "teto", "abaixo de", "com"]}}, {"LIKE_NUM": True}, {"LOWER": {"IN": ["km", "mil km"]}}]])
+        matcher.add("PORTAS", [[{"LIKE_NUM": True}, {"LOWER": {"IN": ["p", "portas"]}}]])
         SPACY_MATCHERS["matcher"] = matcher
-
     except OSError:
         logging.error("Modelo 'pt_core_news_lg' não encontrado. Execute 'python -m spacy download pt_core_news_lg'")
     
@@ -166,7 +243,7 @@ def startup_event():
     # 3. Agendar as atualizações futuras
     logging.info("Agendando tarefas de atualização em background...")
     scheduler = BackgroundScheduler(timezone="America/Sao_Paulo")
-    scheduler.add_job(update_and_reload_inventory, "cron", hour="0,12", minute=5) # Executa às 00:05 e 12:05
+    scheduler.add_job(update_and_reload_inventory, "cron", hour="0,12", minute=5)
     scheduler.start()
     logging.info("Aplicação iniciada e pronta.")
 
@@ -187,16 +264,9 @@ async def search_smart(request: Request):
     if not query:
         return JSONResponse(content={"error": "Query não informada"}, status_code=400)
 
-    # 1. Extrair parâmetros com SpaCy
-    # params = extrair_parametros_com_spacy(query)
+    params = extrair_parametros_com_spacy(query)
+    resultados = filtrar_veiculos_inteligente(VEHICLE_INVENTORY, params)
     
-    # 2. Filtrar o inventário em memória
-    # resultados = filtrar_veiculos_inteligente(VEHICLE_INVENTORY, params)
-    
-    # Resposta de exemplo para demonstração. Substitua pelas duas linhas acima.
-    params = SearchParams(modelos=["Exemplo"])
-    resultados = [v for v in VEHICLE_INVENTORY if "nivus" in v.get("titulo", "").lower()] if VEHICLE_INVENTORY else []
-
     response_data = {
         "query_original": query,
         "parametros_extraidos": params.dict(exclude_defaults=True),
