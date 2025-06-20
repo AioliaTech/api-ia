@@ -1,297 +1,134 @@
-# main.py
-import json
-import logging
-import os
-import re
-from typing import List, Dict, Optional
-
-import spacy
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from rapidfuzz import fuzz
-from spacy.matcher import Matcher, PhraseMatcher
 from unidecode import unidecode
-from apscheduler.schedulers.background import BackgroundScheduler
+from rapidfuzz import fuzz
+from spacy.matcher import PhraseMatcher, Matcher
+import spacy, json, os
 
-# Assumimos que este arquivo existe e contém a função fetch_and_convert_xml
-from xml_fetcher import fetch_and_convert_xml
+app = FastAPI()
+nlp = spacy.load("pt_core_news_sm")
 
-# --- CONFIGURAÇÃO BÁSICA ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-app = FastAPI(
-    title="API de Busca Inteligente de Veículos",
-    description="Busca em um inventário local atualizado por um feed XML, usando PLN com SpaCy."
-)
+# Carrega database.json com marcas e modelos
+with open("database.json", "r", encoding="utf-8") as f:
+    db = json.load(f)
 
-# --- VARIÁVEIS GLOBAIS E CONSTANTES ---
-VOCABULARY_FILE = "fipe_vocabulary.json"
-INVENTORY_FILE = "dados.json"
-SPACY_MATCHERS = {}
-VEHICLE_INVENTORY = []
-MAPEAMENTO_CATEGORIAS = {
-    "gol": "Hatch", "uno": "Hatch", "palio": "Hatch", "celta": "Hatch", "ka": "Hatch",
-    "fiesta": "Hatch", "march": "Hatch", "sandero": "Hatch", "onix": "Hatch", "hb20": "Hatch",
-    "i30": "Hatch", "golf": "Hatch", "polo": "Hatch", "fox": "Hatch", "up": "Hatch",
-    "fit": "Hatch", "city": "Hatch", "yaris": "Hatch", "etios": "Hatch", "clio": "Hatch",
-    "corsa": "Hatch", "bravo": "Hatch", "punto": "Hatch", "208": "Hatch", "argo": "Hatch",
-    "mobi": "Hatch", "c3": "Hatch", "picanto": "Hatch", "astra hatch": "Hatch", "stilo": "Hatch",
-    "focus hatch": "Hatch", "206": "Hatch", "c4 vtr": "Hatch", "kwid": "Hatch", "soul": "Hatch",
-    "agile": "Hatch", "sonic hatch": "Hatch", "fusca": "Hatch",
-    "civic": "Sedan", "corolla": "Sedan", "sentra": "Sedan", "versa": "Sedan", "jetta": "Sedan",
-    "prisma": "Sedan", "voyage": "Sedan", "siena": "Sedan", "grand siena": "Sedan", "cruze": "Sedan",
-    "cobalt": "Sedan", "logan": "Sedan", "fluence": "Sedan", "cerato": "Sedan", "elantra": "Sedan",
-    "virtus": "Sedan", "accord": "Sedan", "altima": "Sedan", "fusion": "Sedan", "mazda3": "Sedan",
-    "mazda6": "Sedan", "passat": "Sedan", "city sedan": "Sedan", "astra sedan": "Sedan", "vectra sedan": "Sedan",
-    "classic": "Sedan", "cronos": "Sedan", "linea": "Sedan", "focus sedan": "Sedan", "ka sedan": "Sedan",
-    "408": "Sedan", "c4 pallas": "Sedan", "polo sedan": "Sedan", "bora": "Sedan", "hb20s": "Sedan",
-    "lancer": "Sedan", "camry": "Sedan", "onix plus": "Sedan",
-    "duster": "SUV", "ecosport": "SUV", "hrv": "SUV", "compass": "SUV", "renegade": "SUV",
-    "tracker": "SUV", "kicks": "SUV", "captur": "SUV", "creta": "SUV", "tucson": "SUV",
-    "santa fe": "SUV", "sorento": "SUV", "sportage": "SUV", "outlander": "SUV", "asx": "SUV",
-    "pajero": "SUV", "tr4": "SUV", "aircross": "SUV", "tiguan": "SUV", "t-cross": "SUV",
-    "rav4": "SUV", "cx5": "SUV", "forester": "SUV", "wrv": "SUV", "land cruiser": "SUV", 
-    "cherokee": "SUV", "grand cherokee": "SUV", "xtrail": "SUV", "murano": "SUV", "cx9": "SUV",
-    "edge": "SUV", "trailblazer": "SUV", "pulse": "SUV", "fastback": "SUV", "territory": "SUV",
-    "bronco sport": "SUV", "2008": "SUV", "3008": "SUV", "c4 cactus": "SUV", "taos": "SUV",
-    "cr-v": "SUV", "corolla cross": "SUV", "sw4": "SUV", "pajero sport": "SUV", "commander": "SUV",
-    "xv": "SUV", "xc60": "SUV", "tiggo 5x": "SUV", "haval h6": "SUV", "nivus": "SUV"
-}
+FRASES_MODELOS = [nlp.make_doc(modelo.lower()) for modelo in db.get("modelos", [])]
+FRASES_MARCAS = [nlp.make_doc(marca.lower()) for marca in db.get("marcas", [])]
 
-# --- MODELOS PYDANTIC (SINTAXE CORRIGIDA) ---
-class SearchParams(BaseModel):
-    marcas: Optional[List[str]] = None
-    modelos: Optional[List[str]] = None
-    versoes: Optional[List[str]] = None
-    categorias: Optional[List[str]] = None
-    cores: Optional[List[str]] = None
-    combustiveis: Optional[List[str]] = None
-    cambios: Optional[List[str]] = None
-    motores: Optional[List[str]] = None
-    opcionais: Optional[List[str]] = None
-    valor_max: Optional[float] = None
-    valor_min: Optional[float] = None
-    ano_max: Optional[int] = None
-    ano_min: Optional[int] = None
-    ano_fabricacao_max: Optional[int] = None
-    ano_fabricacao_min: Optional[int] = None
-    km_max: Optional[int] = None
-    portas: Optional[int] = None
+phrase_matcher_modelos = PhraseMatcher(nlp.vocab, attr="LOWER")
+phrase_matcher_modelos.add("MODELO", FRASES_MODELOS)
+phrase_matcher_marcas = PhraseMatcher(nlp.vocab, attr="LOWER")
+phrase_matcher_marcas.add("MARCA", FRASES_MARCAS)
 
-# --- FUNÇÕES DE LÓGICA ---
+CORES = ["branco", "preto", "prata", "vermelho", "azul", "cinza", "verde", "amarelo"]
 
-def normalizar(texto: str) -> str:
-    """Normaliza texto para comparação."""
-    return unidecode(str(texto)).lower().strip()
 
-def extrair_parametros_com_spacy(query: str) -> SearchParams:
-    """Extrai parâmetros da query usando os matchers SpaCy pré-compilados."""
-    nlp = SPACY_MATCHERS.get("nlp")
-    if not nlp:
-        logging.error("Modelo SpaCy não carregado.")
-        return SearchParams()
+def normalizar(texto):
+    return unidecode(texto).lower().strip().replace("-", "").replace(" ", "")
 
-    doc = nlp(query.lower())
-    params = SearchParams(marcas=[], modelos=[], versoes=[], categorias=[], cores=[], combustiveis=[], cambios=[], motores=[], opcionais=[])
-    
-    param_field_map = {
-        "MARCA": params.marcas, "MODELO": params.modelos, "VERSAO": params.versoes
-        # Adicione outras entidades do PhraseMatcher aqui se as criar
+def converter_preco(valor_str):
+    try:
+        return float(str(valor_str).replace("R$", "").replace(",", "").strip())
+    except:
+        return None
+
+def parse_natural_query(texto):
+    doc = nlp(texto.lower())
+    filtros = {
+        "modelo": None, "marca": None, "cor": None,
+        "ValorMax": None, "AnoMax": None
     }
 
-    if "phrase_matcher" in SPACY_MATCHERS:
-        phrase_matcher = SPACY_MATCHERS["phrase_matcher"]
-        matches = phrase_matcher(doc)
-        for match_id, start, end in matches:
-            entity_label = nlp.vocab.strings[match_id]
-            entity_text = doc[start:end].text
-            if entity_label in param_field_map and entity_text not in param_field_map[entity_label]:
-                param_field_map[entity_label].append(entity_text)
-    
-    if not params.categorias and params.modelos:
-        for modelo in params.modelos:
-            categoria = MAPEAMENTO_CATEGORIAS.get(normalizar(modelo))
-            if categoria and categoria not in params.categorias:
-                params.categorias.append(categoria)
+    for match_id, start, end in phrase_matcher_modelos(doc):
+        filtros["modelo"] = doc[start:end].text
+        break
 
-    if "matcher" in SPACY_MATCHERS:
-        matcher = SPACY_MATCHERS["matcher"]
-        matches = matcher(doc)
-        for match_id, start, end in matches:
-            rule_id = nlp.vocab.strings[match_id]
-            span = doc[start:end]
-            num_token = next((token for token in span if token.like_num), None)
-            if not num_token: continue
-            
-            valor_str = num_token.text.replace('.', '').replace(',', '')
-            valor = int(valor_str) if valor_str.isdigit() else 0
-            
-            is_price = any(t.lower_ in ["mil", "k", "reais"] for t in span) or valor > 5000
+    for match_id, start, end in phrase_matcher_marcas(doc):
+        filtros["marca"] = doc[start:end].text
+        break
 
-            if rule_id.startswith("PRECO") and is_price:
-                if "mil" in span.text or "k" in span.text: valor *= 1000
-                if rule_id == "PRECO_MAX": params.valor_max = float(valor)
-                if rule_id == "PRECO_MIN": params.valor_min = float(valor)
-            elif rule_id == "ANO_MODELO" and 1950 < valor < 2050:
-                if params.ano_min is None: params.ano_min = valor
-                else: params.ano_max = valor
-            elif rule_id == "ANO_FABRICACAO" and 1950 < valor < 2050:
-                if params.ano_fabricacao_min is None: params.ano_fabricacao_min = valor
-                else: params.ano_fabricacao_max = valor
-            elif rule_id == "KM_MAX":
-                if "mil" in span.text or "k" in span.text: valor *= 1000
-                params.km_max = valor
-            elif rule_id == "PORTAS":
-                params.portas = valor
-    
-    for p in ["ano", "ano_fabricacao"]:
-        min_attr, max_attr = f"{p}_min", f"{p}_max"
-        min_val, max_val = getattr(params, min_attr), getattr(params, max_attr)
-        if min_val and max_val and min_val > max_val:
-            setattr(params, min_attr, max_val)
-            setattr(params, max_attr, min_val)
-        if min_val and not max_val:
-            setattr(params, max_attr, min_val)
-    return params
+    for token in doc:
+        if token.text in CORES:
+            filtros["cor"] = token.text
+            break
 
-def filtrar_veiculos_inteligente(vehicles: List[Dict], params: SearchParams) -> List[Dict]:
-    """Filtra a lista de veículos com base nos parâmetros extraídos."""
-    filtered = list(vehicles)
-    text_filters = {
-        "marcas": "marca", "modelos": "modelo", "versoes": "titulo",
-        "categorias": "categoria", "cores": "cor", "combustiveis": "combustivel",
-        "cambios": "cambio", "motores": "titulo"
-    }
-    for param_name, field_name in text_filters.items():
-        param_values = getattr(params, param_name)
-        if param_values:
-            filtered = [
-                v for v in filtered if (val := v.get(field_name)) and any(
-                    fuzz.partial_ratio(normalizar(p_val), normalizar(val)) >= 85 for p_val in param_values
-                )
-            ]
+    matcher = Matcher(nlp.vocab)
+    matcher.add("VALOR", [[{"LIKE_NUM": True}, {"LOWER": {"IN": ["mil", "reais", "k"]}}]])
+    matches = matcher(doc)
+    for _, start, end in matches:
+        span = doc[start:end]
+        for tok in span:
+            if tok.like_num:
+                val = float(tok.text.replace(",", "."))
+                if "mil" in span.text: val *= 1000
+                filtros["ValorMax"] = str(int(val))
+                break
 
-    if params.opcionais:
-        filtered = [
-            v for v in filtered if (opts := v.get("opcionais")) and isinstance(opts, list) and all(
-                any(fuzz.partial_ratio(normalizar(req_opt), normalizar(v_opt)) >= 90 for v_opt in opts)
-                for req_opt in params.opcionais
-            )
-        ]
+    for token in doc:
+        if token.like_num and int(token.text) > 1980 and int(token.text) <= 2025:
+            filtros["AnoMax"] = token.text
+            break
 
-    def to_float(p):
-        if p is None: return None
-        try:
-            return float(str(p).replace(",", "").strip("R$ "))
-        except (ValueError, TypeError):
-            return None
-    
-    if params.valor_max: filtered = [v for v in filtered if (p := to_float(v.get("preco"))) and p is not None and p <= params.valor_max]
-    if params.valor_min: filtered = [v for v in filtered if (p := to_float(v.get("preco"))) and p is not None and p >= params.valor_min]
-    if params.ano_max: filtered = [v for v in filtered if (a := v.get("ano")) and a and int(a) <= params.ano_max]
-    if params.ano_min: filtered = [v for v in filtered if (a := v.get("ano")) and a and int(a) >= params.ano_min]
-    if params.ano_fabricacao_max: filtered = [v for v in filtered if (a := v.get("ano_fabricacao")) and a and int(a) <= params.ano_fabricacao_max]
-    if params.ano_fabricacao_min: filtered = [v for v in filtered if (a := v.get("ano_fabricacao")) and a and int(a) >= params.ano_fabricacao_min]
-    if params.km_max: filtered = [v for v in filtered if (k := v.get("km")) and k and int(k) <= params.km_max]
-    if params.portas: filtered = [v for v in filtered if (p := v.get("portas")) and p and int(p) == params.portas]
-    
-    filtered.sort(key=lambda v: to_float(v.get("preco")) or 0, reverse=True)
-    return filtered
+    return {k: v for k, v in filtros.items() if v}
 
-def load_inventory_from_file():
-    """Carrega ou recarrega o inventário do arquivo dados.json para a memória."""
-    global VEHICLE_INVENTORY
-    if os.path.exists(INVENTORY_FILE):
-        logging.info(f"Carregando/recarregando inventário de '{INVENTORY_FILE}'...")
-        try:
-            with open(INVENTORY_FILE, "r", encoding="utf-8") as f:
-                VEHICLE_INVENTORY = json.load(f).get("veiculos", [])
-            logging.info(f"{len(VEHICLE_INVENTORY)} veículos carregados na memória.")
-        except (json.JSONDecodeError, AttributeError) as e:
-            logging.error(f"Erro ao ler o arquivo JSON do inventário: {e}")
-            VEHICLE_INVENTORY = []
-    else:
-        logging.warning(f"Arquivo de inventário '{INVENTORY_FILE}' não encontrado.")
-        VEHICLE_INVENTORY = []
+def filtrar_veiculos(lista, filtros):
+    resultados = []
+    valormax = float(filtros.get("ValorMax", 1e10))
+    anomax = int(filtros.get("AnoMax", 2100))
 
-def update_and_reload_inventory():
-    """Função que o agendador chamará: busca os dados e recarrega na memória."""
-    logging.info("Tarefa agendada: iniciando atualização do inventário.")
-    try:
-        fetch_and_convert_xml()
-        load_inventory_from_file()
-        logging.info("Tarefa agendada: atualização do inventário concluída.")
-    except Exception as e:
-        logging.error(f"Falha na tarefa agendada de atualização: {e}")
+    for v in lista:
+        preco = converter_preco(v.get("preco")) or 0
+        ano = int(v.get("ano") or 0)
 
-# --- EVENTO DE STARTUP DA API ---
-@app.on_event("startup")
-def startup_event():
-    """Configura tudo quando a aplicação inicia."""
-    # 1. Configurar SpaCy com o vocabulário da FIPE
-    try:
-        nlp = spacy.load("pt_core_news_lg")
-        SPACY_MATCHERS["nlp"] = nlp
-        if os.path.exists(VOCABULARY_FILE):
-            logging.info(f"Carregando vocabulário de '{VOCABULARY_FILE}'...")
-            with open(VOCABULARY_FILE, "r", encoding="utf-8") as f:
-                fipe_vocabulary = json.load(f)
-            
-            phrase_matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
-            entity_map = { "MARCA": fipe_vocabulary.get("marcas", []), "MODELO": fipe_vocabulary.get("modelos", []), "VERSAO": fipe_vocabulary.get("versoes", []) }
-            for label, terms in entity_map.items():
-                if terms:
-                    patterns = [nlp.make_doc(term) for term in terms]
-                    phrase_matcher.add(label, patterns)
-            SPACY_MATCHERS["phrase_matcher"] = phrase_matcher
-            logging.info("PhraseMatcher do SpaCy configurado.")
-        else:
-            logging.warning(f"Arquivo de vocabulário '{VOCABULARY_FILE}' não encontrado.")
-            
-        matcher = Matcher(nlp.vocab)
-        matcher.add("PRECO_MAX", [[{"LOWER": {"IN": ["ate", "maximo", "max", "teto", "abaixo de"]}}, {"IS_SPACE": True, "OP": "?"}, {"LIKE_NUM": True}]])
-        matcher.add("PRECO_MIN", [[{"LOWER": {"IN": ["a partir de", "acima de", "minimo"]}}, {"IS_SPACE": True, "OP": "?"}, {"LIKE_NUM": True}]])
-        matcher.add("ANO_MODELO", [[{"LOWER": "ano", "OP": "!"}, {"LOWER": "de", "OP": "!"}, {"LOWER": "fabricacao", "OP": "!"}, {"IS_DIGIT": True, "SHAPE": "dddd"}]])
-        matcher.add("ANO_FABRICACAO", [[{"LOWER": {"IN": ["fabricado", "fabricacao"]}}, {"LOWER": {"IN": ["em", "de"]}, "OP": "?"}, {"IS_DIGIT": True, "SHAPE": "dddd"}]])
-        matcher.add("KM_MAX", [[{"LOWER": {"IN": ["ate", "com", "maximo"]}}, {"LIKE_NUM": True}, {"LOWER": {"IN": ["km", "mil km"]}}]])
-        matcher.add("PORTAS", [[{"LIKE_NUM": True}, {"LOWER": {"IN": ["p", "portas"]}}]])
-        SPACY_MATCHERS["matcher"] = matcher
-    except OSError:
-        logging.error("Modelo 'pt_core_news_lg' não encontrado. Execute 'python -m spacy download pt_core_news_lg'")
-    
-    # 2. Executar a busca de dados inicial e carregar o inventário
-    logging.info("Executando a busca inicial de dados do inventário...")
-    update_and_reload_inventory()
+        if preco > valormax or ano > anomax:
+            continue
 
-    # 3. Agendar as atualizações futuras
-    logging.info("Agendando tarefas de atualização em background...")
-    scheduler = BackgroundScheduler(timezone="America/Sao_Paulo")
-    scheduler.add_job(update_and_reload_inventory, "cron", hour="0,12", minute=5)
-    scheduler.start()
-    logging.info("Aplicação iniciada e pronta.")
+        match = True
+        for campo in ["modelo", "marca", "cor"]:
+            if campo in filtros and filtros[campo]:
+                if normalizar(filtros[campo]) not in normalizar(str(v.get(campo, ""))):
+                    match = False
+                    break
 
-# --- ENDPOINT DA API ---
-@app.post("/api/search")
-async def search_smart(request: Request):
-    """Recebe uma query em linguagem natural e busca no inventário local de veículos."""
-    if not VEHICLE_INVENTORY:
-        return JSONResponse(content={"error": "O inventário de veículos não está carregado ou está vazio."}, status_code=503)
-    
-    try:
-        request_data = await request.json()
-    except json.JSONDecodeError:
-        return JSONResponse(content={"error": "Corpo da requisição inválido. Deve ser um JSON."}, status_code=400)
+        if match:
+            resultados.append({
+                "id": v.get("id"),
+                "titulo": v.get("titulo"),
+                "marca": v.get("marca"),
+                "modelo": v.get("modelo"),
+                "ano": v.get("ano"),
+                "ano_fabricacao": v.get("ano_fabricacao"),
+                "km": v.get("km"),
+                "cor": v.get("cor"),
+                "combustivel": v.get("combustivel"),
+                "cambio": v.get("cambio"),
+                "motor": v.get("motor"),
+                "portas": v.get("portas"),
+                "categoria": v.get("categoria"),
+                "preco": v.get("preco"),
+                "opcionais": v.get("opcionais"),
+                "fotos": {
+                    "url_fotos": v.get("fotos", {}).get("url_fotos")
+                }
+            })
 
-    query = request_data.get("query")
-    if not query:
-        return JSONResponse(content={"error": "A chave 'query' não foi encontrada no JSON."}, status_code=400)
-        
-    params = extrair_parametros_com_spacy(query)
-    resultados = filtrar_veiculos_inteligente(VEHICLE_INVENTORY, params)
-    
-    return JSONResponse(content={
-        "query_original": query,
-        "parametros_extraidos": params.dict(exclude_defaults=True),
+    return resultados
+
+@app.get("/api/data")
+def buscar(request: Request):
+    if not os.path.exists("data.json"):
+        return JSONResponse({"erro": "Base de dados ausente."}, status_code=404)
+
+    with open("data.json", "r", encoding="utf-8") as f:
+        dados = json.load(f)
+
+    mensagem = request.query_params.get("mensagem")
+    filtros = parse_natural_query(mensagem) if mensagem else {}
+
+    resultados = filtrar_veiculos(dados.get("veiculos", []), filtros)
+
+    return JSONResponse({
+        "resultados": resultados,
         "total_encontrado": len(resultados),
-        "resultados": resultados[:50]
+        "filtros_usados": filtros
     })
