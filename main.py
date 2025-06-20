@@ -36,8 +36,9 @@ def extrair_parametros(mensagem):
         resultado[campo] = doc[start:end].text
 
     for token in doc:
-        if token.like_num:
-            valor = int(token.text.replace(".", "").replace(",", ""))
+        texto_limpo = token.text.replace(".", "").replace(",", "")
+        if texto_limpo.isdigit():
+            valor = int(texto_limpo)
             if 1900 < valor < 2100:
                 resultado["AnoMax"] = valor
             elif 1000 < valor < 500000:
