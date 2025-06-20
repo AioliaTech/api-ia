@@ -547,19 +547,41 @@ def agendar_tarefas():
     fetch_and_convert_xml()
 
 @app.post("/api/search-smart")
-def search_smart(request_data: dict):
-    """Nova endpoint para busca inteligente"""
-    query = request_data.get("query", "")
-    
+async def search_smart(request_data: dict):
+    query = request_data.get("query")
     if not query:
+        # 1) Query não foi enviada
         return JSONResponse(
-            content={"error": "Query não informada", "resultados": [], "total_encontrado": 0},
-            status_code=400
+            content={
+                "error": "Query não informada",
+                "resultados": [],
+                "total_encontrado": 0,
+            },
+            status_code=400,
         )
-    
-    # Carrega dados
+
+    # 2) Verifica se há dados em disco
     if not os.path.exists("data.json"):
         return JSONResponse(
-            content={"error": "Nenhum dado disponível", "resultados": [], "total_encontrado": 0},
-            status_
+            content={
+                "error": "Nenhum dado disponível",
+                "resultados": [],
+                "total_encontrado": 0,
+            },
+            status_code=500,          # ou 404/204, escolha o que fizer sentido
         )
+
+    # 3) Carrega dados do estoque
+    with open("data.json", encoding="utf-8") as f:
+        vehicles = json.load(f)
+
+    # 4) Extrai parâmetros e filtra
+    params = extrair_parametros_inteligente(query)
+    resultados = filtrar_veiculos_inteligente(vehicles, params)
+
+    # 5) Resposta final
+    return {
+        "parametros_detectados": params.dict(exclude_none=True),
+        "total_encontrado": len(resultados),
+        "resultados": resultados,
+    }
