@@ -562,3 +562,4 @@ def search_smart(request_data: dict):
         return JSONResponse(
             content={"error": "Nenhum dado disponível", "resultados": [], "total_encontrado": 0},
             status_
+        )
